@@ -434,7 +434,8 @@ def _git(*args: str, capture: bool = False):
         return None
     try:
         return run_user(
-            ["git", "-C", str(REPO_ROOT), *args],
+            ["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+             "-C", str(REPO_ROOT), *args],
             check=False,
             capture_output=capture,
             text=True,
@@ -452,7 +453,7 @@ def _repo_is_clean_git_checkout() -> bool:
     inside = _git("rev-parse", "--is-inside-work-tree", capture=True)
     if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
         return False
-    status = _git("status", "--porcelain", capture=True)
+    status = _git("status", "--porcelain", "--untracked-files=all", capture=True)
     if status is None or status.returncode != 0:
         return False
     return status.stdout.strip() == ""
@@ -464,17 +465,36 @@ def auto_update_and_reexec(argv: list[str], prog: str = "install") -> None:
     Never follow an unpublished branch tip or update during a GUI transaction.
     Offline, dirty and divergent checkouts retain their current source.
     """
-    if (os.environ.get("MAC_TAHOE_UPDATED") == "1"
+    if (os.environ.get("GOLDEN_GATE_TAHOE_SOURCE")
+            or os.environ.get("MAC_TAHOE_UPDATED") == "1"
             or os.environ.get("MAC_TAHOE_NO_UPDATE_CHECK", "").lower() == "true"):
         return
+    try:
+        _update_published_checkout(argv, prog)
+    finally:
+        helper = REPO_ROOT / 'src/scripts/repository_maintenance.py'
+        if helper.is_file():
+            try:
+                run_user([sys.executable, str(helper), '--auto', '--repository', str(REPO_ROOT)],
+                         check=False, timeout=660)
+            except (OSError, subprocess.SubprocessError) as exc:
+                warn(f'Git maintenance could not finish: {exc}')
+
+
+def _update_published_checkout(argv: list[str], prog: str) -> None:
+    current = read_version().strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", current):
+        return
     latest = fetch_latest_release()
+    from repository_cache import hint
+    hint('lestercorderomurillo/macos-tahoe-liquid-kde', latest)
     if (not latest or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
-            or parse_semver(latest) <= parse_semver(read_version())):
+            or parse_semver(latest) <= parse_semver(current)):
         return
 
     if not _repo_is_clean_git_checkout():
-        note(tr('Not a clean git checkout — skipping auto-update'))
-        print(tr('  \x1b[2mUpdate manually: git pull && ./{prog}\x1b[0m', prog=prog))
+        note(tr('Update available: {current} → {latest}', current=current, latest=latest))
+        note(tr('Keeping local source: changes present or not a clean git checkout'))
         return
 
     def git_ok(*args):
@@ -482,14 +502,21 @@ def auto_update_and_reexec(argv: list[str], prog: str = "install") -> None:
         return result if result is not None and result.returncode == 0 else None
 
     repository = "https://github.com/lestercorderomurillo/macos-tahoe-liquid-kde.git"
-    fetched = git_ok("fetch", "--no-tags", repository, "refs/tags/v" + latest)
+    partial = git_ok('config', '--get', 'remote.origin.partialclonefilter')
+    filtering = ['--filter=blob:none'] if partial is not None and partial.stdout.strip() == 'blob:none' else []
+    fetched = git_ok("fetch", "--no-tags", *filtering, repository, "refs/tags/v" + latest)
     target = git_ok("rev-parse", "FETCH_HEAD^{commit}") if fetched is not None else None
     commit = target.stdout.strip() if target is not None else ""
     version = git_ok("show", commit + ":VERSION") if re.fullmatch(r"[0-9a-f]{40}", commit) else None
-    if (version is None or version.stdout.strip() != latest
-            or git_ok("merge-base", "--is-ancestor", "HEAD", commit) is None
-            or not _repo_is_clean_git_checkout()
-            or git_ok("merge", "--ff-only", commit) is None):
+    if version is None or version.stdout.strip() != latest:
+        warn(tr('Could not verify the published update — keeping the current checkout'))
+        return
+    if git_ok("merge-base", "--is-ancestor", "HEAD", commit) is None:
+        note(tr('Update available: {current} → {latest}', current=current, latest=latest))
+        note(tr('Keeping local commits: the release is not a fast-forward'))
+        return
+    if (not _repo_is_clean_git_checkout()
+            or git_ok("merge", "--ff-only", "--no-overwrite-ignore", commit) is None):
         warn(tr('Could not apply the published update — keeping the current checkout'))
         print("  https://github.com/lestercorderomurillo/macos-tahoe-liquid-kde/releases/tag/v" + latest)
         return
@@ -805,8 +832,8 @@ def verify_config(feat: dict[str, object]) -> None:
         if not feat.get(key, True):
             continue
         if key == "window_decorations":
-            from theme_switch import default_wallpaper
-            expected = f"__aurorae__svg__{default_wallpaper()}LiquidKde-"
+            from theme_switch import decoration_theme
+            expected = "__aurorae__svg__" + decoration_theme("light").removesuffix("Light")
         actual = _read_config_cascade(file, group, prop)
         # Consult other KConfig layers only when neither file has the key.
         if actual is None:

@@ -19,6 +19,55 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
+def test_console_maintenance_preserves_visual_fingerprint_but_ui_changes_do_not(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    installer = tmp_path / 'installer'
+    baseline = 'import sys\nfrom installer_ui import main\nmain(sys.argv[1:])\n'
+    installer.write_text(baseline)
+    (tmp_path / 'install').write_text(baseline)
+    scripts = tmp_path / 'src/scripts'
+    scripts.mkdir(parents=True)
+    localization = scripts / 'localization.py'
+    localization.write_text('_ES = {"Install": "Instalar"}\n')
+    cli = scripts / 'cli.py'
+    cli.write_text('def _git():\n    return "old command"\ndef visible_label():\n    return "Install"\n')
+    before = commit(tmp_path)
+    branch = ('if sys.argv[1:] == ["--free-space"]:\n'
+              '    from repository_maintenance import main\n'
+              '    raise SystemExit(main([]))\n'
+              'if os.environ.get("MAC_TAHOE_UPDATED") == "1":\n'
+              '    from repository_maintenance import main\n'
+              '    main(["--auto"])\n')
+    (scripts / 'repository_maintenance.py').write_text('# console-only Git maintenance\n')
+    (scripts / 'repository_history.py').write_text('# console-only Git history policy\n')
+    (scripts / 'repository_cache.py').write_text('# console-only published blob cache\n')
+    cli.write_text('def _git():\n    return "safe command"\ndef visible_label():\n    return "Install"\n')
+    messages = {"Install": "Instalar", "Compacting Git storage: {path}": "Compactando: {path}"}
+    messages.update({
+        'Recovered {size} MiB. Git ancestry and local recovery data were preserved.':
+            'Se recuperaron {size} MiB. Se conservaron los datos locales de recuperación.',
+        'Published historical files may download again on demand; current source and local work stay available.':
+            'Los archivos históricos publicados pueden descargarse de nuevo cuando se necesiten.',
+        'Git maintenance disabled by local configuration.':
+            'El mantenimiento de Git está desactivado en la configuración local.',
+    })
+    localization.write_text("_ES = " + repr(messages) + "\n")
+    installer.write_text(branch + baseline)
+    after = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) == shots.visual_tree(tmp_path, after)
+    installer.write_text(branch + baseline.replace('main(sys.argv[1:])', 'main(["--uninstall"])'))
+    changed = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) != shots.visual_tree(tmp_path, changed)
+    installer.write_text(branch + baseline)
+    localization.write_text('_ES = {"Install": "New visible label"}\n')
+    changed_label = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) != shots.visual_tree(tmp_path, changed_label)
+    localization.write_text('_ES = {"Install": "Instalar"}\n')
+    cli.write_text('def _git():\n    return "safe command"\ndef visible_label():\n    return "Changed label"\n')
+    changed_cli_ui = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) != shots.visual_tree(tmp_path, changed_cli_ui)
+
+
 @pytest.fixture
 def capture(tmp_path, monkeypatch):
     Image = pytest.importorskip('PIL.Image')
@@ -99,8 +148,8 @@ def test_base_icons_cannot_replace_the_installed_regular_appearance(capture, mod
         shots.verify_committed(repo, final)
 
 
-@pytest.mark.parametrize('path,content', [('VERSION', '1.2.4\n'), ('src/new-code.py', 'changed code\n')])
-def test_new_release_or_code_requires_recapture(capture, path, content):
+@pytest.mark.parametrize('path,content', [('src/new-code.py', 'changed code\n')])
+def test_unknown_runtime_code_requires_recapture(capture, path, content):
     repo, ref, bundle, _ = capture
     (repo / path).write_text(content)
     final = commit(repo)
@@ -304,3 +353,120 @@ def test_installer_gallery_rejects_wrong_page_or_edition(capture, key, value):
     write_json(bundle / 'manifest.json', manifest)
     with pytest.raises(ValueError, match='Wrong installer'):
         shots.validate(repo, ref, bundle, reviewed=False)
+
+
+@pytest.mark.parametrize('path,content', [
+    ('VERSION', '1.2.4\n'), ('AGENTS.md', 'Only test changed visual behavior.\n'),
+    ('TESTING.md', '![Installer](src/screenshots/installer-welcome_v4.png)\nNew console tests passed.\n'),
+    ('tests/new_test.py', '# nonvisual regression coverage\n'),
+    ('.github/workflows/test.yml', '# CI runtime setup does not render the desktop\n'),
+])
+def test_nonvisual_release_reuses_original_reviewed_evidence(capture, path, content):
+    repo, ref, bundle, manifest = capture
+    shots.stage(repo, 'tahoe', bundle, manifest)
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if path == "TESTING.md":
+        target.write_text(target.read_text() + "New console tests passed.\n")
+    else:
+        target.write_text(content)
+    final = commit(repo)
+    shots.validate(repo, final, bundle)
+    record = shots.verify_committed(repo, final)
+    assert record['version'] == '1.2.3'
+    assert record['source_commit'] == ref
+    assert all(image['source_release'] == 'v1.2.3' for image in record['images'].values())
+
+
+def test_updater_exclusion_does_not_hide_other_cli_changes(capture):
+    repo, _, bundle, manifest = capture
+    cli = repo / 'src/scripts/cli.py'
+    cli.write_text('def auto_update_and_reexec():\n    return 1\n\ndef install():\n    return "same UI"\n')
+    source = commit(repo)
+    manifest['source_commit'] = source
+    manifest['source_tree'] = shots.runtime_tree(repo, source)
+    write_json(bundle / 'manifest.json', manifest)
+    cli.write_text(cli.read_text().replace('return 1', 'return 2'))
+    updated = commit(repo)
+    shots.validate(repo, updated, bundle, reviewed=False)
+    cli.write_text(cli.read_text().replace('same UI', 'changed UI'))
+    changed = commit(repo)
+    with pytest.raises(ValueError, match='changed after capture'):
+        shots.validate(repo, changed, bundle, reviewed=False)
+
+
+def test_ui_translation_changes_still_require_recapture(capture):
+    repo, _, bundle, manifest = capture
+    catalog = repo / 'src/scripts/locales/de.json'
+    catalog.parent.mkdir(parents=True)
+    write_json(catalog, {'Welcome': 'Willkommen', 'Update available: {current} → {latest}': 'Alt'})
+    source = commit(repo)
+    manifest['source_commit'] = source
+    manifest['source_tree'] = shots.runtime_tree(repo, source)
+    write_json(bundle / 'manifest.json', manifest)
+    write_json(catalog, {'Welcome': 'Willkommen', 'Update available: {current} → {latest}': 'Neu'})
+    updated = commit(repo)
+    shots.validate(repo, updated, bundle, reviewed=False)
+    write_json(catalog, {'Welcome': 'Changed visible text'})
+    changed = commit(repo)
+    with pytest.raises(ValueError, match='changed after capture'):
+        shots.validate(repo, changed, bundle, reviewed=False)
+
+
+def test_nonvisual_release_publishes_current_version_without_relabeling_images(capture, monkeypatch):
+    repo, _, bundle, manifest = capture
+    shots.stage(repo, 'tahoe', bundle, manifest)
+    (repo / 'VERSION').write_text('1.2.4\n')
+    final = commit(repo)
+    subprocess.run(['git', '-C', str(repo), 'tag', 'v1.2.4'], check=True)
+    original = subprocess.run
+    calls = []
+    def run(command, **kwargs):
+        if command[0] == 'gh':
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+        return original(command, **kwargs)
+    monkeypatch.setattr(subprocess, 'run', run)
+    publish(repo, final)
+    assert calls == [['gh', 'release', 'create', 'v1.2.4', '--verify-tag',
+                      '--title', 'v1.2.4', '--generate-notes']]
+    assert shots.verify_committed(repo, final)['version'] == '1.2.3'
+
+def test_clock_readiness_preserves_photos_but_mode_and_service_changes_do_not(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    scripts = tmp_path / 'src/scripts'
+    scripts.mkdir(parents=True)
+    switcher = scripts / 'theme_switch.py'
+    baseline = ('def detect_mode_by_time():\n    return "dark"\n'
+                'def apply(mode):\n    return "rendered palette"\n'
+                'def main(argv):\n    mode = argv[0]\n'
+                '    if mode == "auto":\n        mode = detect_mode_by_time()\n'
+                '    return apply(mode)\n')
+    switcher.write_text(baseline)
+    offline = tmp_path / 'src/offline'
+    offline.mkdir()
+    service = offline / 'mac-tahoe-liquid-kde-theme.service'
+    service.write_text('[Service]\nExecStart=%h/.local/bin/mac-tahoe-theme-switch auto\n')
+    before = commit(tmp_path)
+    guard = ('        if not wait_for_clock_sync():\n'
+             '            print("theme apply: waiting for clock synchronization; "\n'
+             '                  "automatic service will retry", file=sys.stderr)\n'
+             '            return 75\n')
+    synchronized = ('def wait_for_clock_sync():\n    return True\n' +
+                    baseline.replace('        mode = detect_mode_by_time()\n',
+                                     guard + '        mode = detect_mode_by_time()\n'))
+    switcher.write_text(synchronized)
+    service.write_text(service.read_text() +
+                      '# Clock retry\nRestartForceExitStatus=75\nRestartSec=15s\nTimeoutStartSec=3min\n')
+    after = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) == shots.visual_tree(tmp_path, after)
+    for change in (synchronized.replace('return "dark"', 'return "light"'),
+                   synchronized.replace('rendered palette', 'changed palette'),
+                   synchronized.replace('return 75', 'return 0')):
+        switcher.write_text(change)
+        changed = commit(tmp_path)
+        assert shots.visual_tree(tmp_path, before) != shots.visual_tree(tmp_path, changed)
+    switcher.write_text(synchronized)
+    service.write_text(service.read_text().replace('theme-switch auto', 'theme-switch light'))
+    changed = commit(tmp_path)
+    assert shots.visual_tree(tmp_path, before) != shots.visual_tree(tmp_path, changed)

@@ -328,10 +328,14 @@ commit before opening the wizard. It then re-execs `./install`;
 `MAC_TAHOE_UPDATED=1` prevents recursion. Dirty or diverged checkouts, missing
 git, network failures and mismatched release versions leave the checkout
 unchanged and show the manual update hint. Uninstall does not update itself.
-Golden Gate first uses `GOLDEN_GATE_TAHOE_SOURCE` or a complete sibling
-`../macos-tahoe-liquid-kde` checkout, staging its own defaults in an isolated
-copy without updates or downloads. Without local sources its wrapper
-fast-forwards its own checkout and selects the latest published Tahoe release.
+Golden Gate compares its wrapper and an automatically discovered sibling Tahoe
+checkout to their respective published versions independently. Each clean
+checkout fast-forwards only to a verified newer release; local edits, untracked
+files and divergent local commits remain available for development. Equal or
+newer local versions are never downgraded. `GOLDEN_GATE_TAHOE_SOURCE` explicitly
+selects local testing and disables automatic updates of both repositories.
+Golden Gate stages its own defaults in an isolated copy, never in Tahoe itself.
+Without local sources it selects the latest published Tahoe release.
 It sets `MAC_TAHOE_NO_UPDATE_CHECK=true` for the prepared source.
 
 ## Architecture — Optional Online Rounded Corners
@@ -635,7 +639,11 @@ the units down, so a plain re-install is self-healing.
 
 Both editions use transparent Plasma and Kvantum surfaces in light and dark
 mode. Material presets own blur, refraction and gradient tint. Do not generate
-opaque theme variants or expose a separate reduced-transparency preference.
+opaque theme variants. Window glass offers Classic (unchanged) and Tinted
+(45% white/dark backing in the effect, following the window palette). Keep
+optics identical and shell surfaces unchanged. This choice is independent of
+the edition preset, is exposed in the KCM, and appears in the wizard only when
+Nautilus and Acrylic Glass are selected.
 Legacy appearance files must not influence theme selection; preserve unrelated
 settings and declarative files. Uninstall still cleans up old generated variants.
 Preserve surface masks, shadows, highlights and solid fallbacks.
@@ -700,16 +708,23 @@ the published Tahoe release commit and verified archive SHA-256 before
 publishing the corresponding Golden Gate release. Each README
 shows its own default launcher preset and wallpaper in light and dark mode.
 
-Capture screenshots for EVERY release with `./release-screenshots capture`.
-Use the checksum-pinned disposable VM and fixed recipe in
-`src/scripts/release_capture_profile.json`; never capture on the host desktop.
-Capture both modes in both editions, verify the active effect matches the
-release source, and visually review every fresh image before staging. Missing,
-rejected, mixed-theme or older-release pictures block publication. Commit the
-reviewed images and provenance, run `./release-screenshots verify`, then push
-the release tag through `.github/workflows/release.yml`. Do not bypass the
-gate with a direct `gh release create`. Changes outside `src/screenshots/`
-after capture require a new run, except README/TESTING screenshot filename hash updates. See CONTRIBUTING.md for the full sequence.
+Run visual tests and capture documentation screenshots only when the actual
+change clearly affects visible output: layout, colors, materials, typography,
+icons, wallpaper, controls or rendered UI content. A release, version bump,
+updater fix, translation of console-only messages, documentation edit or CI
+change alone does not justify visual tests or new captures. State the concrete
+visual impact before starting a VM. Reuse reviewed screenshots and their
+original provenance when visual inputs are unchanged; never relabel old images
+as newly captured. Run focused visual checks only for affected components,
+editions and modes, and do not repeat an unchanged passing check. A failed or
+rejected new frame cannot be filled with an older image.
+
+Use `./release-screenshots` and the checksum-pinned disposable VM for any new
+publication captures. Review each new image, preserve content-hashed filenames,
+and verify committed provenance before publication. Publish through
+`.github/workflows/release.yml`; keep exact-commit CI on main and dev mandatory
+in both repositories. Never use direct `gh release create` to bypass the gate.
+See CONTRIBUTING.md for the capture sequence when visual changes require it.
 
 The same defaults file selects `launcher_preset` (Tahoe: 1, Golden Gate: 2).
 `launcher_defaults.py` stamps only the staged launcher's `defaultLauncherPreset`
@@ -1008,6 +1023,21 @@ green   yellow   orange   red   purple   blue
 | Pinned taskbar apps wiped during layout rebuild | First installs, selected layout resets and uninstall rebuild panels from scratch. `layout.py` captures every `launchers=` list from appletsrc first (deduped, minus our own plasmoids), writes it onto the new Mac Dock during install, and restores it onto the default Breeze icontasks during uninstall. Wizard updates preserve the existing layout when reset is unchecked. |
 | GTK popups never get compositor blur           | Client-side popups (Firefox menus, popovers) receive no KWin blur, so GTK CSS popup surfaces must keep mirrored light/dark rgba alpha — literal `transparent` renders see-through (issue #11). The gtk-4.0 sheets must also define every libadwaita named color they reference; only libadwaita apps define those at runtime. `test_static.py` guards both. |
 
+## Documentation style
+
+Keep TESTING.md as a concise snapshot of the latest verified release, stated
+once, followed by the installer photographs. Replace the previous summary;
+never append a changelog, superseded candidates or unreleased development logs.
+Keep one short validation summary with a link to detailed evidence and coverage
+limits. When consolidating accumulated history, reduce the document by at least
+half. Preserve reviewed photographs, content-hashed filenames and original
+provenance; do not recapture or relabel unchanged images. Keep README concise
+and put installer photographs only in TESTING.md.
+
+Limit README installation/update notes to two short lines of user actions.
+Omit updater internals and repeated explanations; keep technical details in
+CONTRIBUTING.md or linked developer documentation.
+
 ## Testing
 
 `./test` runs the full pytest suite. Apply the following scope policy before
@@ -1062,8 +1092,8 @@ on both branches. Earlier-commit evidence never substitutes for the exact-SHA
 release gate: publication requires successful `test.yml` push runs on `main`
 and `dev` for each repository's exact release commit. Never weaken workflows,
 skip required checks or treat missing,
-cancelled or failed checks as success to shorten a task. Release screenshot
-capture and verification remain mandatory for every release.
+cancelled or failed checks as success to shorten a task. Screenshot provenance verification remains mandatory; new visual tests and
+captures are conditional on a clear visual change, as specified below.
 
 Documentation-only delivery does not require a version bump, pin update,
 release or new screenshots. Automatic push CI may still run; report its status
@@ -1148,9 +1178,17 @@ from fresh bundled sources on each installation. Preserve frame geometry,
 borders, rounded-corner settings and tiled/fullscreen shadow suppression.
 
 Golden Gate window controls are generated offline by Tahoe's
-`window_controls.py` for Aurorae and GTK 3/4. Reference observations and
-rendering limits are documented in Tahoe. Preserve Tahoe buttons, shared frame geometry
+`window_controls.py` for Aurorae and GTK 3/4. Preserve Tahoe buttons, shared frame geometry
 and shadow controls. Install both Aurorae families and select the edition in
 the switcher, global-theme defaults and verifier. GTK < 4.20 needs explicit
 mode selection for literal button URLs in its adaptive legacy stylesheet;
 keep ownership detection and screenshot verification consistent with it.
+
+The native wizard has a Window controls step with Flat and Glassy choices and
+reviewed, high-resolution Nautilus title-bar crops from a disposable VM.
+Window shadows has its own page with None, Soft, Medium and Hard comparison
+crops in light and dark mode; keep shadows out of the Effects page.
+Defaults remain edition-specific (Tahoe Flat, Golden Gate Glassy), but an explicit transaction
+choice overrides the edition for Aurorae, GTK, global-theme defaults and the
+standalone switcher. Preserve the choice through light/dark transitions; new
+wizard launches still start from source-edition defaults.

@@ -1,37 +1,26 @@
-"""Offline Golden Gate-inspired controls shared by Aurorae and GTK.
-
-Original vector construction; reference observations and limits are recorded in
-docs/window-controls.md. No Apple or contributor artwork is embedded.
-"""
+"""Generate Golden Gate traffic-light controls for Aurorae and GTK offline."""
 
 from pathlib import Path
 import re
 import shutil
 
-from theme_switch import default_wallpaper
+from theme_switch import decoration_theme, window_control_style
 
 EDITIONS = ("MacTahoe", "MacGoldenGate")
 STATES = ("active", "inactive", "hover", "pressed", "deactivated",
           "hover-inactive", "pressed-inactive", "deactivated-inactive")
-BUTTONS = ("close", "minimize", "maximize", "restore", "alldesktops",
-           "keepabove", "keepbelow")
+BUTTONS = ("close", "minimize", "maximize", "restore")
 COLORS = {
-    "close": ("#ff6f66", "#f77c74", "#f48983", "#9e2019"),
-    "minimize": ("#fdb82c", "#fdc937", "#fdd341", "#ad6200"),
-    "maximize": ("#60ce2f", "#81d55b", "#95d976", "#267c18"),
-    "restore": ("#60ce2f", "#81d55b", "#95d976", "#267c18"),
-    "alldesktops": ("#79c9bd", "#50aa9d", "#a4e0d4", "#276e65"),
-    "keepabove": ("#83b5f5", "#5992df", "#aacffa", "#285b9d"),
-    "keepbelow": ("#c29be9", "#a67bd1", "#d9bff4", "#654292"),
+    "close": ("#f16a72", "#ee5964", "#f68a92", "#921b1b"),
+    "minimize": ("#f8cf30", "#f9c51a", "#fbe254", "#8b5006"),
+    "maximize": ("#6cd52a", "#55ca16", "#8ae34d", "#287f10"),
+    "restore": ("#6cd52a", "#55ca16", "#8ae34d", "#287f10"),
 }
 GLYPHS = {
-    "close": 'M5.6 5.6l4.8 4.8m0-4.8l-4.8 4.8',
-    "minimize": 'M5 8h6',
+    "close": 'M5.2 5.2l5.6 5.6m0-5.6l-5.6 5.6',
+    "minimize": 'M4.8 8h6.4',
     "maximize": 'M5 8V5h3M8 11h3V8',
     "restore": 'M5 8h3V5M8 11V8h3',
-    "alldesktops": 'M6.5 8h3M8 6.5v3',
-    "keepabove": 'M5 9.5l3-3 3 3',
-    "keepbelow": 'M5 6.5l3 3 3-3',
 }
 
 
@@ -42,10 +31,10 @@ def _button(button: str, mode: str, state: str, index: int) -> str:
     dark = mode == "Dark"
     if dark and button in ("close", "minimize", "maximize", "restore"):
         top, middle, bottom = {
-            "close": ("#f86055", "#f45347", "#ef6664"),
-            "minimize": ("#fcb501", "#fbb200", "#fecd32"),
-            "maximize": ("#3bc203", "#32b409", "#4dc13a"),
-            "restore": ("#3bc203", "#32b409", "#4dc13a"),
+            "close": ("#ef5b64", "#e94958", "#f87883"),
+            "minimize": ("#f5c51c", "#f8bd08", "#f9df43"),
+            "maximize": ("#62ce1a", "#4fc70b", "#80df41"),
+            "restore": ("#62ce1a", "#4fc70b", "#80df41"),
         }[button]
     if neutral:
         top, middle, bottom = (("#515151", "#484848", "#505050") if dark
@@ -53,10 +42,10 @@ def _button(button: str, mode: str, state: str, index: int) -> str:
     prefix = f"b{index}"
     # Top/bottom reflections survive loss of focus. Disabled controls are
     # deliberately fainter, unlike inactive but still actionable controls.
-    shine = ".65" if dark else ".18"
+    shine = ".62" if dark else ".44"
     opacity = '.45' if disabled else '1'
     glyph = (f'<path d="{GLYPHS[button]}" fill="none" stroke="{ink}" '
-             'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>') if state in (
+             'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>') if state in (
                  "hover", "pressed", "hover-inactive", "pressed-inactive") else ''
     if button in ("maximize", "restore") and glyph:
         triangles = ("M4.8 4.8h4.6l-4.6 4.6z M11.2 11.2H6.6l4.6-4.6z" if button == "maximize"
@@ -75,7 +64,7 @@ def _button(button: str, mode: str, state: str, index: int) -> str:
     <stop offset="1" stop-color="#fff" stop-opacity="{shine}"/>
   </linearGradient>
   <radialGradient id="{prefix}-glow" cx=".5" cy="1" r=".7">
-    <stop stop-color="#fff" stop-opacity="{'.13' if dark and not neutral else '.02'}"/>
+    <stop stop-color="#fff" stop-opacity="{'.12' if not neutral else '.04'}"/>
     <stop offset="1" stop-color="#fff" stop-opacity="0"/>
   </radialGradient>
 </defs>
@@ -99,8 +88,11 @@ def button_svg(button: str, mode: str, state: str | None = None) -> str:
         groups.append(f'<g id="{current}-center" transform="translate(0 {index * 16})">'
                       '<rect width="16" height="16" fill="none"/>'
                       + _button(button, mode, current, index) + '</g>')
-    return ('<svg xmlns="http://www.w3.org/2000/svg" width="16" '
-            f'height="{16 * len(states)}" viewBox="0 0 16 {16 * len(states)}">\n'
+    # GTK's CSS image loader rasterizes at the SVG's intrinsic size before
+    # scaling. Keep one high-resolution source; CSS still fixes it at 16px.
+    width, height = (128, 128) if state else (16, 16 * len(states))
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+            f'height="{height}" viewBox="0 0 16 {16 * len(states)}">\n'
             + '\n'.join(groups) + '\n</svg>\n')
 
 
@@ -132,8 +124,8 @@ def assemble_aurorae(source: Path, destination: Path, mode: str, edition: str) -
 
 
 def apply_gtk_controls(theme: Path) -> None:
-    """Replace only bundled titlebutton image references in a staged GG theme."""
-    if default_wallpaper() != "MacGoldenGate":
+    """Apply the chosen controls to fresh staged GTK sources in either edition."""
+    if window_control_style() != "glassy":
         return
     states = {'': 'active', '-hover': 'hover', '-active': 'pressed',
               '-backdrop': 'inactive', '-backdrop-hover': 'hover-inactive'}
@@ -169,5 +161,5 @@ def apply_global_theme(theme: Path) -> None:
     if path.is_file():
         path.write_text(re.sub(
             r"(?m)^theme=__aurorae__svg__Mac(?:Tahoe|GoldenGate)LiquidKde-(Light|Dark)$",
-            lambda match: f"theme=__aurorae__svg__{default_wallpaper()}LiquidKde-{match[1]}",
+            lambda match: f"theme=__aurorae__svg__{decoration_theme(match[1].lower())}",
             path.read_text()))

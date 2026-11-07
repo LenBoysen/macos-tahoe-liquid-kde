@@ -23,7 +23,7 @@ KDE Plasma 6.6+ is required to actually exercise the desktop pieces. Most static
 ### Install / uninstall / test
 
 ```sh
-git clone https://github.com/lestercorderomurillo/macos-tahoe-liquid-kde
+git clone --filter=blob:none https://github.com/lestercorderomurillo/macos-tahoe-liquid-kde
 cd macos-tahoe-liquid-kde
 
 ./installer          # graphical install wizard; requests privileges when needed
@@ -31,6 +31,59 @@ cd macos-tahoe-liquid-kde
 ./test               # full pytest suite
 ./test --vm          # plymouth render harness (requires root, see tests/vm/)
 ```
+
+### Installer storage maintenance
+
+Recommended clones use `--filter=blob:none`: full commit ancestry is available
+while historical file contents download only when requested. Existing shallow
+clones from older instructions acquire the full ancestry through a filtered
+fetch only after the same clean, published-source audit passes; development
+checkouts remain unchanged.
+
+Both installers maintain their source storage on ordinary launches, including
+launches after a manual `git pull`. `./installer --free-space` (also available
+through `./install`) runs maintenance explicitly and reports allocated bytes
+recovered without installing or updating either checkout. It may verify release
+metadata online; `MAC_TAHOE_NO_UPDATE_CHECK=true` forbids these queries.
+
+Only a clean, independent canonical clone at an exactly verified published
+release can retire historical file caches. VERSION guides release ordering;
+the published tag, commit and Git ancestry establish identity. Uncommitted,
+staged, untracked, deleted or divergent work, private recovery objects, stashes,
+private tags, active local branches, explicit source overrides, worktrees and
+shared stores prevent this conversion. A newer or equal unpublished version is
+never replaced. Ignored local files also block an update that would overwrite
+them. Update fetches suppress uncontrolled Git auto-maintenance.
+
+Maintenance keeps `.git`, the complete commit/tree graph, canonical tags,
+main/dev positions, current branch snapshots and small historical sources.
+Large obsolete files proven reachable from the published release become a
+`blob:none` partial-clone cache backed by canonical origin. Historical lookups
+can download those files again; ordinary main/dev pulls retain full ancestry,
+including merges based on old releases, without refetching every old asset.
+Only older-version branches already merged into the verified release are
+retired. Active remote work remains. Retired reference IDs and original local
+branch reflogs accumulate in `.git/tahoe-maintenance-journal.json`; recover a
+branch with `git branch <name> <recorded-object-id>`.
+
+Git writer locks, durable replacement packs/configuration, ref comparisons and
+concurrent-state checks protect other processes. Unknown/private objects are
+never classified as cache, and caches in new concurrent packs are not removed.
+No reflog expiry, garbage collection or forced object pruning is used. A failed
+maintenance run never blocks installation. Offline/unverified/development
+sources receive only ordinary packing, preserving all their objects and refs.
+Repacking needs temporary space; savings depend on the history and active tips.
+Set `git config tahoe.maintenance compact` to retain all locally available
+historical files, or `git config tahoe.maintenance off` to disable maintenance.
+To materialize previously evicted history, use
+`git fetch --refetch --no-filter origin`; historical lookups also hydrate it.
+
+Golden Gate retires unused prepared sources and interrupted downloads only
+after a replacement is ready, with leases protecting running installers.
+Verified Rounded Corners downloads and disposable copy staging are cleaned by
+their owning steps. Native builds reuse their component build location.
+Desktop assets, settings, uninstall/browser recovery backups, arbitrary
+untracked folders, developer VM images and capture evidence are preserved.
 
 For the focused dinit integration probe, build and run the official Artix image
 with dinit as PID 1 and a real cron daemon. The repository mount stays read-only;
@@ -53,8 +106,15 @@ Live theme switch without restarting the session:
 ```sh
 mac-tahoe-theme-switch dark      # explicit
 mac-tahoe-theme-switch light
-mac-tahoe-theme-switch auto      # re-enable the 06:00 / 18:00 timer
+mac-tahoe-theme-switch auto      # apply the mode for the current time
 ```
+
+In automatic mode, the systemd user service waits for enabled NTP to synchronize
+before choosing light (06:00–18:00) or dark. This handles an incorrect dual-boot
+RTC at login. Each wait is bounded to 30 seconds; exit status 75 retries after
+15 seconds while preserving the current appearance. Manual choices, disabled
+NTP and non-systemd scheduling retain their existing behavior. The switcher
+never changes the hardware clock, timezone or NTP configuration.
 
 Reload Plasma after a manual fix without a full logout:
 
@@ -201,6 +261,44 @@ before toggling effects. This checks the glass interference from #90, not
 a real VirtualBox guest.
 
 For a general blur regression, use `--identity AcrylicProbe --expect changed`.
+
+Use `--compositor x11 --plugin /path/to/liquidglass_x11.so` for a private
+KWin X11/Xvfb session; `--backend xcb` alone remains an Xwayland client in
+KWin Wayland. X11 captures require Xvfb and currently use scale 1.
+Add `--conflicts` to exercise the installer's live built-in blur handoff,
+reinstall snapshot, active-effect recovery guard and restoration. Use
+`--conflict-effect` to select another installed, ABI-compatible competitor.
+A competitor that cannot load is a failed control, not a passing handoff.
+
+`--renderer hardware` requires a render device accessible to the isolated
+compositor. Inspect `support.txt` for the actual renderer: a container or
+successful plugin build alone proves no rendering. `--screenshot-api dbus`
+uses KWin's raw Wayland screenshot API when Spectacle cannot capture; it
+requires python-dbus and relaxes screenshot authorization only in the spawned
+private compositor. Never apply that environment setting to a desktop session.
+
+Use `--application nautilus --material tahoe` (or `golden-gate`) to launch
+real Nautilus with privately staged bundled GTK assets. Synthetic captures
+remain the default. `--damage` compares a partial synthetic backdrop update
+with a full repaint; a passing pre-fix control makes the regression claim
+inconclusive. These captures do not replace full desktop lifecycle qualification.
+
+For the Nautilus client fallback, use `--identity org.gnome.Nautilus
+--expect changed --no-decoration-blur`. Repeat with `--backend xcb` to cover
+resource-name matching. Add `--backing-tint --appearance light` or
+`--backing-tint --appearance dark` to check the Tinted window material.
+Classic and Tinted share their optical settings; Tinted blends a 45% white
+or black backing over the blurred background beneath application windows.
+Panels and menus retain their own materials. The KCM exposes this independently
+of edition presets; the wizard shows it only with Nautilus and Acrylic Glass.
+The probe checks `debug liquidglass status` for shader readiness as well as
+plugin loading. These synthetic clients do not qualify the real Nautilus app.
+
+Installation hands off from known competing blurs only after compilation and
+material setup succeed, verifies their unload, and saves their settings under
+`$XDG_STATE_HOME/mac-tahoe-liquid-kde/blur-conflicts.json` (default
+`~/.local/state/mac-tahoe-liquid-kde/`). Activation failure and uninstall restore
+those settings while preserving subsequent user changes.
 Use `--renderer hardware` and expose a render node in containers when KWin
 requires one (6.8); this does not connect to the host's desktop session.
 The probe builds a private desktop-entry cache for Spectacle authorization.
@@ -393,14 +491,21 @@ Be a decent human. I'll close anything abusive, off-topic, or trying to drag thi
 Keep the installer gallery in [TESTING.md](TESTING.md); the README links to it
 without embedding installer screenshots. Desktop and Dock photographs stay in the README.
 
-Every release requires a new complete capture. Use `./release-screenshots`,
-not the older single-window helper, for publication. The release workflow
+New captures are required only when the diff clearly changes visible output.
+For nonvisual releases, retain the reviewed images and their original capture
+version and source; run `./release-screenshots verify` without starting a VM.
+The verifier conservatively rejects changed visual inputs and unknown source
+changes. Console updater logic/messages, documentation, tests, release
+verification tools and a version bump alone do not invalidate visual evidence.
+When new captures are needed, use `./release-screenshots` for publication. The release workflow
 verifies committed provenance before creating the GitHub release. Never use
 old images to fill a failed or rejected case. Main README desktop galleries
 show Files and About This Computer separately in both modes. Each frame must
 contain only its featured application with that window focused; capture and
 release validation reject combined or unfocused desktops. Distro qualification
 screenshots are outside this gallery rule.
+
+For a release that changes visual output:
 
 1. Finish the source changes, set `VERSION`, and commit the release candidate.
 2. Run `./release-screenshots capture --ref HEAD --vm-image /path/to/neon-base.qcow2 --output build/captures/vVERSION`.
@@ -418,9 +523,8 @@ screenshots are outside this gallery rule.
    and its checkout as `--destination`. Both versions must already match.
    Staging gives each image a filename containing its content SHA-256 prefix,
    updates README and TESTING URLs, and removes replaced images and obsolete aliases.
-5. Commit the screenshots. This commit may change only `src/screenshots/`
-   and README/TESTING screenshot filename hashes relative to the captured candidate;
-   other changes require recapture.
+5. Commit the screenshots. Further changes to visual inputs require recapture;
+   nonvisual edits do not. Preserve the capture version and source in provenance.
    Run `./release-screenshots verify`. Push the version tag to trigger the
    gated release workflow. Its release title is exactly `vVERSION`.
    Pin Golden Gate to that published Tahoe commit and verified archive, commit

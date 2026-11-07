@@ -36,6 +36,13 @@ def test_all_controls_render_every_interaction_state(mode):
             painter.end()
             assert image.pixelColor(16, 16).alpha() > 50
             assert image.pixelColor(0, 0).alpha() == 0
+            if state == 'active':
+                # The supplied reference concentrates light at the rim:
+                # retain a bright edge without a white patch across the face.
+                middle = image.pixelColor(16, 16).lightnessF()
+                assert abs(image.pixelColor(16, 8).lightnessF() - middle) < .04
+                assert image.pixelColor(16, 3).lightnessF() > middle + .08
+                assert image.pixelColor(16, 24).lightnessF() > middle + .06
             pixels[state] = image.constBits().asstring(image.sizeInBytes())
         assert pixels["active"] != pixels["inactive"] != pixels["deactivated"]
         assert pixels["active"] != pixels["hover"] != pixels["pressed"]
@@ -43,28 +50,30 @@ def test_all_controls_render_every_interaction_state(mode):
 
 
 @pytest.mark.parametrize("edition", controls.EDITIONS)
-def test_install_reinstall_switch_and_uninstall(repo, tmp_path, monkeypatch, edition):
+@pytest.mark.parametrize("style", ("flat", "glassy"))
+def test_install_reinstall_switch_and_uninstall(repo, tmp_path, monkeypatch, edition, style):
     from steps import window_decorations as step
     from window_shadows import aurorae_svg
     destination = tmp_path / "aurorae"
     monkeypatch.setattr(step, "DEST_DIR", destination)
     monkeypatch.setattr(step, "qdbus_call", lambda *args: True)
     monkeypatch.setattr(theme_switch, "default_wallpaper", lambda: edition)
-    monkeypatch.setattr(controls, "default_wallpaper", lambda: edition)
     writes = []
     monkeypatch.setattr(step, "kw_write", lambda *args: writes.append(args) or True)
-    monkeypatch.setenv("MTTKDE_WIZARD_OPTIONS", json.dumps({"shadows": "soft"}))
+    monkeypatch.setenv("MTTKDE_WIZARD_OPTIONS", json.dumps({"shadows": "soft", "window_controls": style}))
+    family = "MacGoldenGate" if style == "glassy" else "MacTahoe"
+
     for mode in ("light", "dark", "light"):
         monkeypatch.setattr(step, "theme_mode", lambda: mode)
         step.install()
-        assert any(args[-2:] == ("theme", f"__aurorae__svg__{edition}LiquidKde-{mode.title()}")
+        assert any(args[-2:] == ("theme", f"__aurorae__svg__{family}LiquidKde-{mode.title()}")
                    for args in writes)
         for prefix in controls.EDITIONS:
             for variant in ("Light", "Dark"):
                 name = f"{prefix}LiquidKde-{variant}"
                 package = destination / name
                 rc = (package / f"{name}rc").read_text()
-                assert "TitleEdgeTop=8" in rc  # No unverified taller title bar.
+                assert "TitleEdgeTop=8" in rc  # Preserve shared title-bar geometry.
                 assert f"ButtonSpacing={7 if prefix == 'MacGoldenGate' else 10}" in rc
                 assert json.loads((package / "metadata.json").read_text())["KPlugin"]["Id"] == name
                 original = repo / f"src/offline/aurorae/MacTahoeLiquidKde-{variant}/decoration.svg"
@@ -74,6 +83,9 @@ def test_install_reinstall_switch_and_uninstall(repo, tmp_path, monkeypatch, edi
                         repo / f"src/offline/aurorae/icons-{variant}/close.svg").read_bytes()
                 else:
                     assert (package / "close.svg").read_text() == controls.button_svg("close", variant)
+                    for button in ("alldesktops", "keepabove", "keepbelow"):
+                        assert (package / f"{button}.svg").read_bytes() == (
+                            repo / f"src/offline/aurorae/icons-{variant}/{button}.svg").read_bytes()
     from steps import global_theme
     monkeypatch.setattr(global_theme, "DEST_DIR", tmp_path / "look-and-feel")
     monkeypatch.setattr(global_theme, "install_tree", lambda src, dst, name:
@@ -81,7 +93,7 @@ def test_install_reinstall_switch_and_uninstall(repo, tmp_path, monkeypatch, edi
     global_theme.install()
     for variant in ("light", "dark"):
         defaults = (global_theme.DEST_DIR / f"org.kde.mac-tahoe-liquid-kde.{variant}/contents/defaults").read_text()
-        assert f"theme=__aurorae__svg__{edition}LiquidKde-{variant.title()}" in defaults
+        assert f"theme=__aurorae__svg__{family}LiquidKde-{variant.title()}" in defaults
     custom = destination / "Custom"
     custom.mkdir()
     step.uninstall()
@@ -95,10 +107,10 @@ def test_gtk_controls_use_same_artwork_and_leave_other_assets_alone(repo, tmp_pa
     for version in (3, 4):
         shutil.copytree(source / f"gtk-{version}.0", theme / f"gtk-{version}.0")
     original = {p.relative_to(theme): p.read_bytes() for p in theme.rglob("*.css")}
-    monkeypatch.setattr(controls, "default_wallpaper", lambda: "MacTahoe")
+    monkeypatch.setattr(theme_switch, "default_wallpaper", lambda: "MacTahoe")
     controls.apply_gtk_controls(theme)
     assert all((theme / p).read_bytes() == data for p, data in original.items())
-    monkeypatch.setattr(controls, "default_wallpaper", lambda: "MacGoldenGate")
+    monkeypatch.setattr(theme_switch, "default_wallpaper", lambda: "MacGoldenGate")
     controls.apply_gtk_controls(theme)
     for path, data in original.items():
         css = theme / path
@@ -151,3 +163,31 @@ def test_standalone_switcher_retains_decoration_edition(repo, tmp_path, monkeypa
         assert module.write_kde_theme_config(mode)
         assert any(args[-2:] == ("theme", f"__aurorae__svg__{edition}LiquidKde-{mode.title()}")
                    for args in writes)
+
+
+@pytest.mark.parametrize("edition", controls.EDITIONS)
+@pytest.mark.parametrize("style", ("flat", "glassy"))
+def test_explicit_style_overrides_edition_for_gtk_and_installed_switcher(repo, tmp_path, monkeypatch, edition, style):
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    monkeypatch.setattr(theme_switch, "default_wallpaper", lambda: edition)
+    monkeypatch.setenv("MTTKDE_WIZARD_OPTIONS", json.dumps({"window_controls": style}))
+    family = "MacGoldenGate" if style == "glassy" else "MacTahoe"
+    source = repo / "src/offline/gtk/MacTahoeLiquidKde-Light"
+    theme = tmp_path / "theme"
+    shutil.copytree(source / "gtk-4.0", theme / "gtk-4.0")
+    controls.apply_gtk_controls(theme)
+    css = (theme / "gtk-4.0/gtk.css").read_text()
+    assert ("golden-gate-close" in css) == (style == "glassy")
+    script = tmp_path / "mac-tahoe-theme-switch"
+    text = (repo / "src/scripts/theme_switch.py").read_text()
+    text = text.replace('DEFAULT_WALLPAPER = "MacTahoe"', f'DEFAULT_WALLPAPER = "{edition}"')
+    text = text.replace('INSTALLER_OPTIONS = {}', f'INSTALLER_OPTIONS = {{"window_controls": "{style}"}}')
+    script.write_text(text)
+    loader = SourceFileLoader("style_switcher", str(script))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    # An unrelated launch environment must not override the installed choice.
+    monkeypatch.setenv("MTTKDE_WIZARD_OPTIONS", '{"window_controls":"other"}')
+    for mode in ("light", "dark", "light"):
+        assert module.decoration_theme(mode) == f"{family}LiquidKde-{mode.title()}"

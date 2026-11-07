@@ -20,6 +20,8 @@ ENUMS = {
     "launcher": ("tahoe", "golden"),
     "files": ("nautilus", "dolphin", "keep"),
     "shadows": ("none", "soft", "medium", "hard"),
+    "window_controls": ("flat", "glassy"),
+    "glass_style": ("classic", "tinted"),
 }
 WALLPAPERS = {
     "tahoe": ("MacTahoe", "MacTahoe"),
@@ -35,7 +37,8 @@ def defaults() -> dict:
         appearance="auto", icons="regular", color="blue", wallpaper=edition,
         wallpaper_path="", launcher=edition, panel=True, dock=True, reset_layout=True,
         acrylic_glass=True, rounded_corners=True, shadows="medium", fonts=True, firefox=True,
-        files="nautilus", nautilus_bookmarks=True, plymouth=True,
+        window_controls="glassy" if edition == "golden" else "flat",
+        files="nautilus", nautilus_bookmarks=True, plymouth=True, glass_style="classic",
         oled_care=False, oled_interval=5, oled_max_shift=8,
     )
 

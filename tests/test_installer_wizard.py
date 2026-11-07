@@ -27,6 +27,7 @@ def test_new_wizard_uses_source_defaults_after_other_edition(monkeypatch, tmp_pa
     selected = choices.defaults()
     assert selected["wallpaper"] == selected["launcher"] == expected
     assert selected["appearance"] == "auto"
+    assert selected["window_controls"] == ("glassy" if edition == "MacGoldenGate" else "flat")
     assert selected["reset_layout"]
     assert choices.features(selected, cli.DEFAULT_FEATURES, existing_install=True)["layout"]
     actual = choices.features(selected, cli.DEFAULT_FEATURES)
@@ -35,12 +36,33 @@ def test_new_wizard_uses_source_defaults_after_other_edition(monkeypatch, tmp_pa
     assert json.loads(config.read_text()) == stale  # Opening is read-only.
 
 
-@pytest.mark.parametrize("payload", [[], {"shell": "echo bad"}, {"icons": "unknown"}, {"shadows": "unknown"},
+@pytest.mark.parametrize("payload", [[], {"shell": "echo bad"}, {"icons": "unknown"}, {"shadows": "unknown"}, {"window_controls": "unknown"}, {"glass_style": "unknown"},
                                     {"fonts": "false"}, {"oled_interval": True},
                                     {"oled_max_shift": 17}, {"wallpaper": "custom"}])
 def test_reject_invalid_selections_before_install(payload):
     with pytest.raises(ValueError):
         choices.validate(payload)
+
+
+def test_control_previews_are_lossless_vm_crops_with_verified_hashes(repo):
+    import hashlib
+    from PIL import Image
+    folder = repo / 'src/installer/assets'
+    sources = json.loads((folder / 'sources.json').read_text())
+    cases = [('controls', style) for style in ('flat', 'glassy')]
+    cases += [('shadows', level) for level in ('none', 'soft', 'medium', 'hard')]
+    for kind, value in cases:
+        for mode in ('light', 'dark'):
+            record = sources[f'window-{kind}-{value}-{mode}.png']
+            path = folder / record['file']
+            checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert checksum == record['sha256'] and checksum[:12] in path.name
+            assert record['window']['active']
+            assert 'nautilus' in record['window']['resourceClass'].lower()
+            assert record['scale'] == 4 and len(record['source_sha256']) == 64
+            with Image.open(path) as image:
+                assert image.format == 'PNG'
+                assert image.width >= 724 and image.height >= (380 if kind == 'controls' else 232)
 
 
 def test_preserve_options_and_mandatory_components():
@@ -212,9 +234,19 @@ for page, _ in STEPS:
     assert window.scroll.verticalScrollBar().maximum() == 0, page
     assert window.content.findChild(type(window.label('')), 'pageTitle') is not None or page == 'welcome'
     cards = window.content.findChildren(ChoiceCard)
-    if page in ('appearance', 'icons', 'wallpaper', 'launcher', 'fonts', 'files'):
+    if page in ('appearance', 'icons', 'wallpaper', 'launcher', 'window_controls', 'shadows', 'fonts', 'files'):
         assert cards and cards[0].isChecked(), page
         assert cards[0].height() > 80, page
+# Match the capture VM's larger system typography: the added shadows row must
+# still leave the complete summary visible at the normal wizard size.
+original_font = window.font()
+capture_font = window.font(); capture_font.setPointSizeF(14)
+window.setFont(capture_font)
+window.language.setCurrentIndex(window.language.findData('en')); app.processEvents()
+window.page = 'summary'; window.render(); app.processEvents(); app.processEvents()
+assert window.scroll.verticalScrollBar().maximum() == 0
+window.setFont(original_font)
+window.language.setCurrentIndex(window.language.findData('es')); app.processEvents()
 window.page = 'welcome'; window.render(); app.processEvents()
 assert window.express.isVisible()
 assert window.express.x() > window.language.x() + window.language.width()
@@ -257,6 +289,15 @@ cards = window.content.findChildren(ChoiceCard)
 assert cards[0].y() == cards[1].y()
 assert cards[0].height() == cards[1].height()
 assert abs(window.dots.mapTo(window, window.dots.rect().center()).x() - window.width()/2) <= 2
+window.page = 'window_controls'; window.render(); app.processEvents()
+window.content.findChild(ChoiceCard, 'choice-window_controls-glassy').click()
+assert window.choices['window_controls'] == 'glassy'
+window.page = 'summary'; window.render(); app.processEvents()
+window.content.findChild(QPushButton, 'edit-window_controls').click()
+assert window.page == 'window_controls'
+window.content.findChild(ChoiceCard, 'choice-window_controls-flat').click()
+window.advance(); app.processEvents()
+assert window.page == 'summary' and window.choices['window_controls'] == 'flat'
 window.page = 'icons'; window.render(); app.processEvents()
 window.content.findChild(ChoiceCard, 'choice-icons-keep').click(); app.processEvents()
 assert window.choices['icons'] == 'keep'
@@ -319,7 +360,7 @@ class PageEvents(QObject):
             self.hidden += 1
         return False
 for page in ('appearance', 'icons', 'wallpaper', 'launcher', 'layout', 'effects',
-             'fonts', 'firefox', 'files', 'boot', 'oled'):
+             'window_controls', 'shadows', 'fonts', 'firefox', 'files', 'boot', 'oled'):
     window.page = page; window.render(); app.processEvents(); app.processEvents()
     content = window.content
     observer = PageEvents(); content.installEventFilter(observer)
@@ -378,6 +419,25 @@ window.select('files', 'nautilus'); assert bookmarks.isVisible() and not bookmar
 window.content.findChild(RadioOption, 'choice-files-keep').click(); app.processEvents()
 assert window.choices['files'] == 'keep' and not bookmarks.isVisible()
 assert not any(card.isChecked() for card in window.content.findChildren(ChoiceCard))
+window.advance(); app.processEvents()
+assert window.page == 'boot'
+window.previous(); app.processEvents()
+assert window.page == 'files'
+window.select('files', 'nautilus')
+window.advance(); app.processEvents()
+assert window.page == 'glass_style'
+window.content.findChild(RadioOption, 'choice-glass_style-tinted').click()
+assert window.choices['glass_style'] == 'tinted'
+window.advance(); window.previous(); app.processEvents()
+assert window.page == 'glass_style' and window.choices['glass_style'] == 'tinted'
+window.choices['acrylic_glass'] = False
+window.page = 'files'; window.render()
+window.advance(); app.processEvents()
+assert window.page == 'boot'
+window.previous(); app.processEvents()
+assert window.page == 'files'
+window.choices['acrylic_glass'] = True
+window.select('files', 'keep')
 window.page = 'summary'; window.render(); app.processEvents()
 assert window.choices['files'] == 'keep'
 window.existing_install = True
@@ -396,15 +456,23 @@ reset.click(); app.processEvents()
 assert window.choices['reset_layout'] and all(card.isEnabled() for card in cards)
 assert window.scroll.verticalScrollBar().maximum() == 0
 window.page = 'effects'; window.render(); app.processEvents()
+assert not window.content.findChildren(RadioOption)
+assert not any(c.objectName().startswith('choice-shadows-') for c in window.content.findChildren(ChoiceCard))
+window.page = 'shadows'; window.render(); app.processEvents()
 assert window.choices['shadows'] == 'medium'
-options = window.content.findChildren(RadioOption)
+options = window.content.findChildren(ChoiceCard)
 assert len(options) == 4 and options[0].objectName() == 'choice-shadows-medium'
 for level in ['none', 'soft', 'medium', 'hard']:
-    window.content.findChild(RadioOption, 'choice-shadows-' + level).click()
+    window.content.findChild(ChoiceCard, 'choice-shadows-' + level).click()
     assert window.choices['shadows'] == level
 assert window.scroll.verticalScrollBar().maximum() == 0
 window.page = 'summary'; window.render(); app.processEvents()
 assert window.choices['shadows'] == 'hard'
+window.content.findChild(QPushButton, 'edit-shadows').click(); app.processEvents()
+assert window.page == 'shadows'
+window.content.findChild(ChoiceCard, 'choice-shadows-soft').click()
+window.advance(); app.processEvents()
+assert window.page == 'summary' and window.choices['shadows'] == 'soft'
 window.page = 'oled'; window.render(); app.processEvents()
 spins = window.content.findChildren(QSpinBox)
 window.select('oled_care', True); assert all(spin.isEnabled() for spin in spins)
