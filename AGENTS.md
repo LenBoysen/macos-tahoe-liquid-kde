@@ -639,11 +639,29 @@ the units down, so a plain re-install is self-healing.
 
 Both editions use transparent Plasma and Kvantum surfaces in light and dark
 mode. Material presets own blur, refraction and gradient tint. Do not generate
-opaque theme variants. Window glass offers Classic (unchanged) and Tinted
-(45% white/dark backing in the effect, following the window palette). Keep
-optics identical and shell surfaces unchanged. This choice is independent of
-the edition preset, is exposed in the KCM, and appears in the wizard only when
-Nautilus and Acrylic Glass are selected.
+opaque theme variants. Keep shell surfaces unchanged. The KCM offers Tahoe (Clear),
+Tahoe (Frosted) and Golden Gate (Official). Golden Gate clear is hidden from
+the selector; old selections retain their saved optics and display Official. Alternate
+presets use the shared `tinted_values` overrides; selection, Restore and the
+installer apply them consistently. Tahoe (Clear) uses the former Frost Glass
+optics with blur 5; Tahoe (Frosted) differs only in blur strength 12. Preserve `MaterialPreset` IDs 1/2 and the
+legacy `BackingTint` key as the alternate-preset identity only. It no longer
+activates a flat backing, and retired BackgroundColor, BackgroundAutomatic and
+BackgroundOpacity keys must not affect rendering.
+The single Background gradient section owns the color overlay. Top, center
+and bottom each have separate Light mode and Dark mode color pickers, with a
+shared tint strength per stop and a center position from 0 (top) to 1 (bottom).
+Colors follow each window's palette at render time. Existing Gradient*Color
+keys serve light mode; absent Gradient*DarkColor keys inherit the old color in
+both the renderer and KCM. Save explicit dark colors, including default black,
+so a custom light color cannot override a deliberate dark choice.
+Golden Gate (Official) uses blur 4, refraction 0.032, color separation 8 px,
+refraction width 64 px, highlight width 16 px, highlight strength 0.1,
+brightness 1.1, contrast 1, saturation 1.13 and no grain. Its gradient uses
+#CECECE in light mode and black in dark mode, with top/center/bottom strengths
+1/0.69/0 and center position 0.56. Window decoration blur is enabled. Corners and window rules
+remain independent. Endpoint positions collapse the corresponding segment
+safely; keep interpolation premultiplied and surface coverage unchanged.
 Legacy appearance files must not influence theme selection; preserve unrelated
 settings and declarative files. Uninstall still cleans up old generated variants.
 Preserve surface masks, shadows, highlights and solid fallbacks.
@@ -681,17 +699,21 @@ per-screen ownership: selecting an edition never resets custom wallpapers;
 `--reset-wallpapers` remains the explicit opt-in. Golden Gate is a download
 wrapper selecting `MacGoldenGate`, not a separate theme implementation.
 
-Golden Gate's upper glass gradient applies to menus in both light and dark
-mode: 85% black at the top, fading completely within the first 55% of the
-surface height. The lower 45% keeps untinted glass. Dock surfaces are exempt
+Golden Gate (Official) is the only offered Golden Gate material and the
+installer default. Its independently tuned three-stop gradient, documented
+above, applies to menus in both light and dark mode. Dock surfaces are exempt
 from the gradient under every material; do not
 change the saved gradient settings or remove their blur and refraction.
-Dock/panel glass uses a compact Kawase pyramid (up to three levels), less grain
-and 98% centre coverage, with a mild angled lens near the rim. Keep the Gaussian
+Dock/panel optics stay pinned to v0.62.0 independently of window presets and
+fine tuning: three Kawase levels, offset `5 * 0.14`, repaint expansion 50,
+RGB separation `12 * 0.24`, refraction 0.1 / width 18, highlight 3.5 / 0.1,
+brightness 1, contrast 1, saturation 1.33 and 98% centre coverage. The old
+grain strength 1 generated an all-zero texture, so skip that no-op on Docks.
+Corner geometry and rendering fixes remain active. Keep the Gaussian
 finish dense: reconstruct its 5×5 binomial kernel with nine bilinear samples,
 never widen it by separating taps into displaced backdrop copies. Blend the surface normal
 with the centre-directed lens in normalized local coordinates. Derive this
-per surface from the selected material without rewriting optical preferences;
+per surface without rewriting optical preferences;
 menus retain their full blur. Keep the bevel displacement independent of the
 Dock's length and scale it in device pixels.
 Dock captures must use `widgets/panel-background.svgz`, not a light/dark dialog
@@ -890,7 +912,7 @@ bootloader probe.
 | ---------------------------- | ---- |
 | `tests/containers/Dockerfile.<distro>` | One per supported distro. CachyOS pulls both `archlinux-keyring` and `cachyos-keyring` after `pacman-key --init && pacman-key --populate archlinux cachyos`. |
 | `tests/containers/Dockerfile.arch-kdeunstable` | Canary against Arch's `[kde-unstable]` staging repo — catches the next Plasma release early. Every matrix target, including staging, must pass. |
-| `tests/containers/run_in_container.py` | Per-distro probe: qmake6 resolves, the distro layer agrees with what qmake6 reports, every `package_for()` token resolves in the distro's repo (with a "transient network" skip so flaky upstream CDN edges don't tank CI), preflight destination checks, pytest. |
+| `tests/containers/run_in_container.py` | Per-distro probe: qmake6 resolves, the distro layer agrees with what qmake6 reports, every `package_for()` token resolves in the distro's repo (with a "transient network" skip so flaky upstream CDN edges don't tank CI), preflight destination checks and platform-sensitive pytest. The general suite runs once per commit, split into disjoint file shards. |
 | `tests/containers/run_matrix.sh` | Local runner. CI runs the same workflow via `.github/workflows/test.yml`. |
 
 Gentoo is no longer a supported installation target. Package-manager entry
@@ -1071,7 +1093,10 @@ qualification on every distro for this fix.
 
 Run focused checks while implementing; reserve broad integration runs for a
 stable candidate. Required CI supplies the complete suite and configured distro
-matrix on the final implementation commit. Do not also run the entire matrix
+matrix on the final implementation commit. The full general suite runs once on
+`dev` (two disjoint shards); each distro retains dependency, SDK build, native
+rendering and platform checks. `main` reuses the successful `dev` result only
+for the identical commit. Pull requests run their own complete checks. Do not also run the entire matrix
 locally unless CI cannot exercise the needed case or a failure needs local
 reproduction. Run the shared suite against the prepared source when staging
 changes executable behavior; a pin-only update to an already validated Tahoe
@@ -1090,7 +1115,9 @@ that evidence.
 For implementation delivery, inspect required CI results for the exact commits
 on both branches. Earlier-commit evidence never substitutes for the exact-SHA
 release gate: publication requires successful `test.yml` push runs on `main`
-and `dev` for each repository's exact release commit. Never weaken workflows,
+and `dev` for each repository's exact release commit. A `main` promotion run
+may verify the latest successful `dev` push run for that exact SHA instead of
+repeating it; missing, failed or cancelled evidence blocks promotion. Never weaken workflows,
 skip required checks or treat missing,
 cancelled or failed checks as success to shorten a task. Screenshot provenance verification remains mandatory; new visual tests and
 captures are conditional on a clear visual change, as specified below.

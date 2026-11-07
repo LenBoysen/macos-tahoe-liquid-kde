@@ -37,7 +37,7 @@ STEPS = (
 )
 
 
-def picture(name, width, height, other=None, *, cover=False):
+def picture(name, width, height, other=None, *, cover=False, crop=None):
     """Contain full screenshots; diagonal splits share the same canvas."""
     canvas = QPixmap(width*2, height*2)
     canvas.fill(Qt.GlobalColor.transparent)
@@ -50,6 +50,8 @@ def picture(name, width, height, other=None, *, cover=False):
         source = QPixmap(str(ASSETS / ASSET_FILES[filename]["file"]))
         if source.isNull():
             continue
+        if crop is not None:
+            source = source.copy(*crop)
         fitted = source.scaled(width*2, height*2, Qt.AspectRatioMode.KeepAspectRatioByExpanding if cover else Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation)
         fitted.setDevicePixelRatio(2)
@@ -943,11 +945,19 @@ class InstallerWindow(OpaqueSurface):
         self.body.addWidget(self.label("Close, minimize and maximize buttons."))
 
     def page_glass_style(self):
-        self.radio("glass_style", [
-            ("classic", "Classic"), ("tinted", "Tinted"),
-        ], inline=True)
-        self.body.addWidget(self.label("Classic keeps the original glass. Tinted adds a white backing in light mode and a dark backing in dark mode."))
-        self.body.addWidget(self.label("Both use the same blur, refraction and highlights. Applies to application windows; panels and menus keep their own materials."))
+        mode = self.mode
+        automatic = self.choices["appearance"] == "auto"
+        self.cards("glass_style", [
+            (key, title, "", picture(f"glass-preset-{preset}-{mode}.png",
+                                     232, 220,
+                                     f"glass-preset-{preset}-dark.png" if automatic else None,
+                                     cover=True, crop=(820, 300, 1280, 1214)))
+            for key, title, preset in (
+                ("classic", "Tahoe (Clear)", "tahoe-clear"),
+                ("tinted", "Tahoe (Frosted)", "tahoe-frosted"),
+                ("official", "Golden Gate (Official)", "golden-gate-official"),
+            )
+        ], columns=3)
 
     def page_shadows(self):
         self.cards("shadows", [
@@ -1031,7 +1041,9 @@ class InstallerWindow(OpaqueSurface):
         names = {"auto": "Automatic", "light": "Light", "dark": "Dark", "regular": "Regular",
                  "glass": "Glass", "keep": "Keep", "golden": "Golden Gate", "tahoe": "Tahoe",
                  "landscape": "Landscape", "sonoma": "Sonoma", "custom": "Custom file",
-                 "nautilus": "Nautilus", "dolphin": "Dolphin"}
+                 "nautilus": "Nautilus", "dolphin": "Dolphin",
+                 "classic": "Tahoe (Clear)", "tinted": "Tahoe (Frosted)",
+                 "official": "Golden Gate (Official)"}
         value = lambda key: self.t(names.get(str(c[key]), str(c[key]).capitalize()))
         enabled = lambda key: self.t("Enabled" if c[key] else "Disabled")
         desktop = " + ".join(self.t(label) for key, label in (("panel", "Top bar"), ("dock", "Dock")) if c[key])
@@ -1063,7 +1075,7 @@ class InstallerWindow(OpaqueSurface):
             entry = QWidget()
             entry.setObjectName("summaryEntry")
             entry.setStyleSheet(f"QWidget#summaryEntry {{ border-bottom: 1px solid {self.line}; }}")
-            row = QHBoxLayout(entry); row.setContentsMargins(0, 4, 0, 4); row.setSpacing(12)
+            row = QHBoxLayout(entry); row.setContentsMargins(0, 2, 0, 2); row.setSpacing(12)
             label = self.label(title); label.setObjectName("detail"); label.setFixedWidth(94)
             label.setFont(relative_font(self, .86)); row.addWidget(label)
             choice = self.label(text); choice.setFont(relative_font(self, .86)); row.addWidget(choice, 1)

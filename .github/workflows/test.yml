@@ -6,8 +6,21 @@ on:
   pull_request:
     branches: [main, dev]
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
+  promotion:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/require-ci.yml
+    with:
+      repository: ${{ github.repository }}
+      sha: ${{ github.sha }}
+      branches: '["dev"]'
+
   nix:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -23,8 +36,21 @@ jobs:
   # daily-driver libdir convention). The full Plasma 6 dev SDK is
   # available here so this is the broadest pytest run.
   test:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
     container: archlinux:latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/build/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NODIRECT: 'true'
+      CCACHE_MAXSIZE: 256M
     steps:
       - uses: actions/checkout@v5
       - name: Install deps
@@ -41,7 +67,7 @@ jobs:
         run: |
           pacman -Sy --noconfirm --needed archlinux-keyring
           pacman -Syu --noconfirm \
-            python python-pytest zstd python-pillow python-gobject python-pyqt6 gtk4 \
+            python python-pytest ccache zstd python-pillow python-gobject python-pyqt6 gtk4 \
             qt6-svg librsvg xorg-server-xvfb xorg-xprop bash git diffutils findutils \
             base-devel cmake extra-cmake-modules pkgconf \
             qt6-base qt6-declarative qt6-wayland qt6-tools \
@@ -65,21 +91,30 @@ jobs:
           node --version
           command -v plasmoidviewer
           command -v xprop
-      - name: Run tests
+      - uses: actions/cache@v4
+        with:
+          path: build/ccache
+          key: ccache-primary-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: ccache-primary-${{ matrix.shard }}-
+      - name: Run disjoint test shard
         run: |
-          output=$(python -m pytest tests -q --ignore=tests/containers 2>&1) || exit_code=$?
-          echo "$output"
-          count=$(echo "$output" | grep -oE '[0-9]+ passed' | tail -n 1 | grep -oE '[0-9]+')
-          if [ -n "$count" ]; then
-            echo "### Tests: $count passing" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit ${exit_code:-0}
+          ccache --zero-stats
+          python .github/scripts/test_shard.py ${{ matrix.shard }} 2
+      - name: Report compiler cache usage
+        if: always()
+        run: ccache --show-stats
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-${{ matrix.shard }}
+          path: build/ci/*.xml
 
   # Cross-distro matrix — proves the qmake6-driven path discovery
   # works on every distro the README claims support for. Each leg
   # runs the same container test from tests/containers/, so a regression
   # that breaks one distro can't silently sneak through CI.
   cross-distro:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -105,24 +140,30 @@ jobs:
           - arch-kdeunstable
     steps:
       - uses: actions/checkout@v5
-      # Every matrix target is required, including the staging SDK.
-      - name: Build and run ${{ matrix.distro }} container
+      - name: Select weekly compiler cache
+        id: sdk
+        run: echo "epoch=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Build ${{ matrix.distro }} SDK image
+        run: docker build --pull -f tests/containers/Dockerfile.${{ matrix.distro }} -t mttkde-test-${{ matrix.distro }}:ci .
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.distro }}-${{ steps.sdk.outputs.epoch }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: ccache-${{ matrix.distro }}-${{ steps.sdk.outputs.epoch }}-
+      - name: Verify ${{ matrix.distro }} dependencies, native builds and platform behavior
         run: |
-          # Retry the build: pulling the base image from Docker Hub can
-          # transiently time out / rate-limit from GitHub runners, which
-          # has nothing to do with our code. 3 attempts, 15s backoff.
-          for attempt in 1 2 3; do
-            if docker build \
-                -f tests/containers/Dockerfile.${{ matrix.distro }} \
-                -t mttkde-test-${{ matrix.distro }}:ci \
-                .; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "::error::docker build failed after 3 attempts"
-              exit 1
-            fi
-            echo "build attempt $attempt failed — retrying in 15s"
-            sleep 15
-          done
-          docker run --rm mttkde-test-${{ matrix.distro }}:ci
+          mkdir -p "$RUNNER_TEMP/ccache"
+          docker run --rm \
+            -v "$RUNNER_TEMP/ccache:/ccache" \
+            -e CMAKE_C_COMPILER_LAUNCHER=ccache \
+            -e CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -e CCACHE_DIR=/ccache -e CCACHE_BASEDIR=/repo \
+            -e CCACHE_COMPILERCHECK=content -e CCACHE_NODIRECT=true \
+            -e CCACHE_MAXSIZE=256M \
+            mttkde-test-${{ matrix.distro }}:ci sh -c '
+              ccache --zero-stats || exit $?
+              python3 tests/containers/run_in_container.py
+              result=$?
+              ccache --show-stats
+              exit "$result"
+            '

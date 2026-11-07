@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -13,7 +14,8 @@ def publish(repo, ref, tahoe=None):
     record = verify_committed(repo, ref, tahoe=tahoe)
     tag = 'v' + git(repo, 'show', commit_id(repo, ref) + ':VERSION')
     require(commit_id(repo, tag) == commit_id(repo, ref), 'Release tag does not point to the verified commit')
-    subprocess.run(['gh', 'release', 'create', tag, '--verify-tag', '--title', tag, '--generate-notes'],
+    prerelease = ['--prerelease', '--latest=false'] if re.search(r'rc\.?[0-9]+$', tag) else []
+    subprocess.run(['gh', 'release', 'create', tag, '--verify-tag', '--title', tag, '--generate-notes', *prerelease],
                    cwd=repo, check=True)
 
 
@@ -25,6 +27,7 @@ def main(argv=None):
     capture.add_argument('--ref', default='HEAD')
     capture.add_argument('--vm-image', type=Path, required=True)
     capture.add_argument('--output', type=Path, required=True)
+    capture.add_argument('--reuse', type=Path, help='Reuse reviewed frames whose visual inputs are unchanged')
     review = sub.add_parser('review', help='Record a decision for images you have visually inspected')
     review.add_argument('--ref', default='HEAD')
     review.add_argument('--bundle', type=Path, required=True)
@@ -44,7 +47,7 @@ def main(argv=None):
         if args.command == 'capture':
             from release_capture import capture as run_capture
             verify_recipe(args.repo, args.ref)
-            run_capture(args.repo, args.ref, args.vm_image, args.output)
+            run_capture(args.repo, args.ref, args.vm_image, args.output, reuse=args.reuse)
             print(f'Captured all frames. Visually inspect {args.output / "frames"} before review.')
         elif args.command == 'review':
             manifest = validate(args.repo, args.ref, args.bundle, reviewed=False)

@@ -13,13 +13,15 @@ PROFILE = ROOT / 'src/scripts/release_capture_profile.json'
 EDITIONS = {'tahoe': ('MacTahoe', 1, 'v4'), 'golden-gate': ('MacGoldenGate', 2, 'v1')}
 INSTALLER_PAGES = ('welcome', 'appearance', 'icons', 'wallpaper', 'launcher', 'layout',
                    'effects', 'window_controls', 'shadows', 'fonts', 'firefox', 'files', 'glass_style', 'boot', 'oled', 'summary')
-CASES = ('launcher', 'dock', 'menu', 'context', 'finder', 'showcase', 'about') + tuple(
+MATERIAL_CASES = {'glass-tahoe-clear': (1, 0), 'glass-tahoe-frosted': (1, 1),
+                  'glass-golden-gate-official': (2, 1)}
+CASES = tuple(MATERIAL_CASES) + ('launcher', 'dock', 'menu', 'context', 'finder', 'showcase', 'about') + tuple(
     'installer-' + page for page in INSTALLER_PAGES)
 MODES = ('light', 'dark')
 RECIPE_FILES = ('release_capture.py', 'release_capture_guest.py', 'release_capture_profile.json',
                 'release_screenshots.py', 'screenshot_checks.py', 'release_capture_wizard.py')
 STATIC_ART = {'banner_v3.png', 'banner.png', 'macos-26.png', 'macos-27.png', 'macos-27-dark.png'}
-SCREENSHOT_DOCS = ('README.md', 'TESTING.md')
+SCREENSHOT_DOCS = ('README.md', 'TESTING.md', 'GLASS_PRESETS.md')
 
 
 def digest(path: Path) -> str:
@@ -61,7 +63,12 @@ def runtime_tree(repo: Path, ref: str) -> str:
     return hashlib.sha256(b'\0'.join(entries)).hexdigest()
 
 
-def visual_tree(repo: Path, ref: str) -> str:
+# Reviewed v0.63.0 packaging-only changes. Any later code edit invalidates
+# this equivalence; payload bytes themselves remain in the visual fingerprint.
+FONT_PACKAGING_EQUIVALENCE = {'src/scripts/steps/fonts.py': ('6f4912e04de79b1a56d11462badd3f90eadd4eaf', 'e7791550d140d5556939697041c92f197fb4e41d'), 'nix/packages.nix': ('5c0207d9554df4e414c9d4dcea9d99709a66ccf3', '1cd61cc57b9c3f2fdfa05bfaaaf8937ec2599e3b')}
+FONT_BUNDLE_IMPLEMENTATION = 'eafb4b4909c933982b80360d07a72d3a27a3ee69'
+
+def visual_tree(repo: Path, ref: str, *, ignore_paths: frozenset[str] = frozenset()) -> str:
     """Conservative visual inputs; unknown runtime changes require new evidence.
 
     Keep runtime_tree unchanged so historical manifest hashes remain verifiable.
@@ -84,16 +91,38 @@ def visual_tree(repo: Path, ref: str) -> str:
         'Not the root of a Git checkout.',
     }
     entries = []
+    font_entries = {}
     for entry in subprocess.check_output(['git', '-C', str(repo), 'ls-tree', '-rz', ref]).split(b'\0'):
         if not entry:
             continue
         metadata, raw_path = entry.split(b'\t', 1)
         path = raw_path.decode()
-        if (path == 'VERSION' or path.endswith('.md') or path.startswith(('tests/', 'src/screenshots/', '.github/'))
+        if (path in ignore_paths or path in ('VERSION', '.dockerignore') or path.endswith('.md') or path.startswith(('tests/', 'src/screenshots/', '.github/'))
                 or path in ('src/scripts/release_screenshots.py', 'src/scripts/release_screenshots_cli.py',
                             'src/scripts/repository_maintenance.py', 'src/scripts/repository_history.py',
                             'src/scripts/repository_cache.py')):
             continue
+        object_id = metadata.split()[-1].decode()
+        if path == 'src/scripts/font_bundle.py' and object_id == FONT_BUNDLE_IMPLEMENTATION:
+            continue
+        equivalence = FONT_PACKAGING_EQUIVALENCE.get(path)
+        if equivalence and object_id == equivalence[0]:
+            entries.append(metadata.rsplit(b' ', 1)[0] + b' ' + equivalence[1].encode() + b'\t' + raw_path)
+            continue
+        if path.startswith('src/offline/fonts/'):
+            if path.endswith(('.otf', '.ttf')):
+                font_entries[path] = hashlib.sha256(blob(repo, ref, path)).hexdigest()
+                continue
+            if path.endswith('/fonts.json'):
+                continue
+            if path.endswith('/fonts.tar.xz'):
+                from font_bundle import unpacked_fonts
+                manifest = json.loads(blob(repo, ref, 'src/offline/fonts/fonts.json'))
+                for name, data in unpacked_fonts(blob(repo, ref, path), manifest).items():
+                    font_path = 'src/offline/fonts/' + name
+                    require(font_path not in font_entries, 'Duplicate packed font')
+                    font_entries[font_path] = hashlib.sha256(data).hexdigest()
+                continue
         if path == 'src/scripts/cli.py':
             module = ast.parse(blob(repo, ref, path))
             module.body = [node for node in module.body if not (
@@ -155,7 +184,140 @@ def visual_tree(repo: Path, ref: str) -> str:
             continue
         entries.append(metadata.split(b' ', 1)[0] + b'\t' + raw_path + b'\t' +
                        hashlib.sha256(content).hexdigest().encode())
+    entries.extend((path + '\t' + digest).encode() for path, digest in sorted(font_entries.items()))
     return hashlib.sha256(b'\0'.join(entries)).hexdigest()
+
+
+
+def _scoped_python(repo: Path, ref: str, path: str) -> dict[str, str]:
+    module = ast.parse(blob(repo, ref, path))
+    functions = {}
+    def strip(body, prefix=''):
+        kept = []
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Adding an optional crop does not change existing uncropped calls.
+                if node.name == 'picture':
+                    pairs = [(arg, value) for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults)
+                             if arg.arg != 'crop']
+                    node.args.kwonlyargs = [pair[0] for pair in pairs]
+                    node.args.kw_defaults = [pair[1] for pair in pairs]
+                    for parent in ast.walk(node):
+                        if isinstance(parent, (ast.For, ast.FunctionDef)):
+                            parent.body = [child for child in parent.body if not (
+                                isinstance(child, ast.If) and
+                                ast.dump(child.test) == ast.dump(ast.parse('crop is not None', mode='eval').body))]
+                functions[prefix + node.name] = ast.dump(node, include_attributes=False)
+            else:
+                if isinstance(node, ast.ClassDef):
+                    node.body = strip(node.body, node.name + '.')
+                kept.append(node)
+        return kept
+    module.body = strip(module.body)
+    functions['<module>'] = ast.dump(module, include_attributes=False)
+    return functions
+
+
+def affected_frames(repo: Path, source: str, target: str) -> set[str]:
+    """Conservative dependencies: unknown changes invalidate every frame."""
+    all_frames = expected_frames()
+    if visual_tree(repo, source) == visual_tree(repo, target):
+        return set()
+    changed = set(git(repo, 'diff', '--name-only', source, target).splitlines())
+    ignored = set()
+    affected = set()
+    def cases(names, editions=EDITIONS):
+        affected.update(f'{e}-{m}-{c}' for e in editions for m in MODES for c in names)
+    for path in changed:
+        if path == 'src/installer/wizard_window.py':
+            before, after = (_scoped_python(repo, ref, path) for ref in (source, target))
+            methods = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+            allowed = {'InstallerWindow.page_glass_style': 'installer-glass_style',
+                       'InstallerWindow.page_summary': 'installer-summary'}
+            if methods - allowed.keys():
+                return all_frames
+            cases([allowed[key] for key in methods])
+        elif path == 'src/scripts/paths.py':
+            normalized = []
+            for ref in (source, target):
+                module = ast.parse(blob(repo, ref, path))
+                module.body = [node for node in module.body if not (
+                    isinstance(node, ast.FunctionDef) and node.name == 'read_version'
+                    or isinstance(node, ast.Import) and
+                    all(alias.name == 're' and alias.asname is None for alias in node.names))]
+                normalized.append(ast.dump(module, include_attributes=False))
+            if normalized[0] != normalized[1]:
+                return all_frames
+            cases(['installer-welcome', 'about'])
+        elif path == 'src/scripts/installer_choices.py':
+            normalized = []
+            for ref in (source, target):
+                module = ast.parse(blob(repo, ref, path))
+                for node in ast.walk(module):
+                    if isinstance(node, ast.Dict):
+                        pairs = [(k, v) for k, v in zip(node.keys, node.values)
+                                 if not isinstance(k, ast.Constant) or k.value != 'glass_style']
+                        node.keys = [k for k, _ in pairs]
+                        node.values = [v for _, v in pairs]
+                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'dict':
+                        node.keywords = [k for k in node.keywords if k.arg != 'glass_style']
+                normalized.append(ast.dump(module, include_attributes=False))
+            if normalized[0] != normalized[1]:
+                return all_frames
+            cases(['installer-glass_style', 'installer-summary'])
+        elif path == 'src/scripts/steps/acrylic_glass.py':
+            before, after = (_scoped_python(repo, ref, path) for ref in (source, target))
+            methods = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+            if methods - {'_edition_preset', '_install_backing_tint'}:
+                return all_frames
+            cases([case for case in CASES if not case.startswith('installer-')])
+        elif path == 'src/scripts/glass_surfaces.py':
+            before, after = (_scoped_python(repo, ref, path) for ref in (source, target))
+            methods = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+            if methods - {'apply_plasma_surface_defaults'}:
+                return all_frames
+            cases(['launcher', 'menu', 'context'], ['golden-gate'])
+        elif path.startswith('src/installer/assets/glass-preset-'):
+            cases(['installer-glass_style'])
+        elif path == 'src/installer/assets/sources.json':
+            before, after = (json.loads(blob(repo, ref, path)) for ref in (source, target))
+            keys = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+            if any(not key.startswith('glass-preset-') for key in keys):
+                return all_frames
+            cases(['installer-glass_style'])
+        elif path == 'src/scripts/release_capture.py':
+            # Orchestration selects frames; each selected frame still uses the
+            # pinned guest renderer, readback, stability and identity checks.
+            pass
+        else:
+            continue
+        ignored.add(path)
+    if visual_tree(repo, source, ignore_paths=frozenset(ignored)) != visual_tree(
+            repo, target, ignore_paths=frozenset(ignored)):
+        return all_frames
+    return affected
+
+
+def frame_origin(manifest: dict, frame: dict) -> tuple[str, str, str]:
+    return (frame.get('source_commit', manifest['source_commit']),
+            frame.get('source_tree', manifest['source_tree']),
+            frame.get('source_version', manifest['version']))
+
+
+def verify_frame_origins(repo: Path, manifest: dict, target: str) -> None:
+    require(runtime_tree(repo, manifest['source_commit']) == manifest['source_tree'],
+            'Inconsistent capture source tree')
+    cache = {}
+    for name, frame in manifest['frames'].items():
+        source, tree, version = frame_origin(manifest, frame)
+        if source not in cache:
+            require(runtime_tree(repo, source) == tree, 'Inconsistent frame source tree')
+            require(git(repo, 'show', source + ':VERSION') == version, 'Frame source version mismatch')
+            require(subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', source, target],
+                                   capture_output=True).returncode == 0, 'Frame source is not an ancestor')
+            cache[source] = (tree, version, affected_frames(repo, source, target))
+        require(cache[source][:2] == (tree, version), 'Inconsistent frame origin')
+        require(name not in cache[source][2], 'Affected frame needs recapture: ' + name)
 
 
 def verify_visual_source(repo: Path, source: str, target: str, source_tree: str) -> None:
@@ -165,6 +327,15 @@ def verify_visual_source(repo: Path, source: str, target: str, source_tree: str)
             'Capture source is not an ancestor of this release')
     require(visual_tree(repo, source) == visual_tree(repo, target),
             'Visual release source changed after capture; recapture required')
+
+
+def material_values(presets: list[dict], case: str) -> dict:
+    material, variant = MATERIAL_CASES[case]
+    preset = next(p for p in presets if p['value'] == material)
+    values = dict(preset['values'])
+    if variant:
+        values.update(preset.get('tinted_values', {}))
+    return values | {'MaterialPreset': material, 'BackingTint': variant}
 
 
 def expected_frames() -> set[str]:
@@ -229,13 +400,16 @@ def verify_icon_appearance(name: str, record: dict) -> None:
 def validate(repo: Path, ref: str, bundle: Path, *, reviewed: bool = True) -> dict:
     from PIL import Image
     manifest = json.loads((bundle / 'manifest.json').read_text())
-    require(manifest.get('schema') == 1, 'Unsupported screenshot manifest')
+    require(manifest.get('schema') in (1, 2), 'Unsupported screenshot manifest')
     source = commit_id(repo, manifest['source_commit'])
     target = commit_id(repo, ref)
     require(subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', source, target],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0,
             'Capture source is not an ancestor of this release')
-    verify_visual_source(repo, source, target, manifest['source_tree'])
+    if manifest.get('schema') == 2:
+        verify_frame_origins(repo, manifest, target)
+    else:
+        verify_visual_source(repo, source, target, manifest['source_tree'])
     require(manifest['version'] == git(repo, 'show', source + ':VERSION'),
             'Capture version differs from its original source')
     require(json.loads(blob(repo, target, 'src/scripts/defaults.json')) ==
@@ -270,9 +444,12 @@ def validate(repo: Path, ref: str, bundle: Path, *, reviewed: bool = True) -> di
                     f'Wrong installer page: {name}')
             require(record.get('installer_edition') == EDITIONS[edition][0],
                     f'Wrong installer edition: {name}')
-        if case in ('finder', 'showcase', 'about'):
+        if case in ('finder', 'showcase', 'about') or case in MATERIAL_CASES:
             verify_desktop_window(case, record['windows'])
-        if case in ('finder', 'showcase'):
+        if case in MATERIAL_CASES:
+            presets = json.loads(blob(repo, source, 'src/offline/kwin-effects/acrylic-glass/src/presets.json'))
+            require(record.get('material_values') == material_values(presets, case), f'Wrong glass material: {name}')
+        if case in ('finder', 'showcase') or case in MATERIAL_CASES:
             from screenshot_checks import check_files_pixels
             with Image.open(path) as image:
                 check_files_pixels(image, mode, record['windows'], profile['scale'])
@@ -340,7 +517,8 @@ def _stage(repo: Path, edition: str, bundle: Path, manifest: dict) -> None:
         hashed = str(Path(filename).with_suffix('')) + '-' + checksum[:12] + '.png'
         (out / filename).rename(out / hashed)
         replacements[filename] = hashed
-        records[hashed] = dict(record, source_commit=manifest['source_commit'], source_release='v' + manifest['version'],
+        origin, _, origin_version = frame_origin(manifest, record)
+        records[hashed] = dict(record, frame_name=name, source_commit=origin, source_release='v' + origin_version,
                                sha256=checksum)
         if name.startswith(edition + '-') and case == 'about':
             full_name = f'desktop_about_{mode}_4k.png'
@@ -348,8 +526,8 @@ def _stage(repo: Path, edition: str, bundle: Path, manifest: dict) -> None:
             full_hashed = str(Path(full_name).with_suffix('')) + '-' + full_hash[:12] + '.png'
             shutil.copyfile(source, out / full_hashed)
             replacements[full_name] = full_hashed
-            records[full_hashed] = dict(record, crop=None, source_commit=manifest['source_commit'],
-                                       source_release='v' + manifest['version'], sha256=full_hash)
+            records[full_hashed] = dict(record, crop=None, frame_name=name, source_commit=origin,
+                                       source_release='v' + origin_version, sha256=full_hash)
     for name in SCREENSHOT_DOCS:
         document = repo / name
         if not document.is_file():
@@ -361,7 +539,7 @@ def _stage(repo: Path, edition: str, bundle: Path, manifest: dict) -> None:
         require(required <= records.keys(), f'Uncaptured {document.stem} images: {sorted(required - records.keys())}')
         document.write_text(content)
     (out / 'release-capture.json').write_text(json.dumps({
-        'schema': 1, 'version': manifest['version'], 'source_commit': manifest['source_commit'],
+        'schema': manifest['schema'], 'version': manifest['version'], 'source_commit': manifest['source_commit'],
         'source_tree': manifest['source_tree'], 'profile_sha256': manifest['profile_sha256'],
         'vm_image_sha256': manifest['vm_image_sha256'], 'effect_build': manifest['effect_build'],
         'edition': edition, 'images': records, 'review': json.loads((bundle / 'review.json').read_text()),
@@ -392,7 +570,10 @@ def verify_committed(repo: Path, ref: str, *, tahoe: Path | None = None) -> dict
         require(json.loads(blob(repo, ref, 'defaults.json')) ==
                 {'wallpaper': EDITIONS[edition][0], 'launcher_preset': EDITIONS[edition][1]},
                 'Golden Gate defaults differ from the capture recipe')
-    verify_visual_source(source_repo, source, target, record['source_tree'])
+    if record.get('schema') == 2:
+        verify_frame_origins(source_repo, record['capture_manifest'], target)
+    else:
+        verify_visual_source(source_repo, source, target, record['source_tree'])
     require(capture_version == git(source_repo, 'show', source + ':VERSION'),
             'Capture version differs from its original source')
     manifest = record['capture_manifest']
@@ -413,6 +594,11 @@ def verify_committed(repo: Path, ref: str, *, tahoe: Path | None = None) -> dict
             'Every release capture must be reviewed')
     for name, frame in manifest['frames'].items():
         verify_icon_appearance(name, frame)
+        case = next((c for c in MATERIAL_CASES if name.endswith('-' + c)), None)
+        if case:
+            presets = json.loads(blob(source_repo, source, 'src/offline/kwin-effects/acrylic-glass/src/presets.json'))
+            require(frame.get('material_values') == material_values(presets, case), f'Wrong glass material: {name}')
+            verify_desktop_window(case, frame['windows'])
         if name.endswith(('-finder', '-showcase', '-about')):
             verify_desktop_window(name.rsplit('-', 1)[1], frame['windows'])
     committed_docs = set(git(repo, 'ls-tree', '--name-only', ref, '--', *SCREENSHOT_DOCS).splitlines())
@@ -430,6 +616,8 @@ def verify_committed(repo: Path, ref: str, *, tahoe: Path | None = None) -> dict
         require(name.endswith('-' + image['sha256'][:12] + '.png'), 'Screenshot URL is missing its content hash: ' + name)
         require(hashlib.sha256(blob(repo, ref, 'src/screenshots/' + name)).hexdigest() == image['sha256'],
                 'Screenshot changed after review: ' + name)
-        require(image['source_commit'] == source and image['source_release'] == 'v' + capture_version,
+        image_source, _, image_version = (frame_origin(manifest, manifest['frames'][image['frame_name']])
+                                          if record.get('schema') == 2 else (source, '', capture_version))
+        require(image['source_commit'] == image_source and image['source_release'] == 'v' + image_version,
                 'Stale screenshot: ' + name)
     return record

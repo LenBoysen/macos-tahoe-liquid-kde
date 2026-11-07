@@ -348,22 +348,14 @@ GITHUB_RELEASES_URL = (
 )
 
 
-def parse_semver(version: str) -> tuple[int, int, int]:
-    """Permissive semver tuple. Returns ``(0, 0, 0)`` on garbage rather
-    than raising — a bad release tag must never block the installer."""
-    if not version:
-        return (0, 0, 0)
-    s = version.strip().lstrip("vV").split("-", 1)[0].split("+", 1)[0]
-    parts = s.split(".")
-    out: list[int] = []
-    for p in parts[:3]:
-        try:
-            out.append(int(p))
-        except ValueError:
-            out.append(0)
-    while len(out) < 3:
-        out.append(0)
-    return (out[0], out[1], out[2])
+def parse_semver(version: str) -> tuple[int, int, int, int, int]:
+    """Order release candidates before stable versions; invalid tags sort first."""
+    match = re.fullmatch(r"[vV]?(\d+)\.(\d+)(?:\.(\d+))?(?:(?:-)?rc\.?(\d+))?(?:\+[^\s]+)?",
+                         (version or "").strip())
+    if not match:
+        return (0, 0, 0, 0, 0)
+    major, minor, patch, candidate = match.groups()
+    return (int(major), int(minor), int(patch or 0), int(candidate is None), int(candidate or 0))
 
 
 def fetch_latest_release(timeout: float = 2.5) -> str | None:
@@ -483,12 +475,12 @@ def auto_update_and_reexec(argv: list[str], prog: str = "install") -> None:
 
 def _update_published_checkout(argv: list[str], prog: str) -> None:
     current = read_version().strip()
-    if not re.fullmatch(r"\d+\.\d+\.\d+", current):
+    if not re.fullmatch(r"\d+\.\d+(?:\.\d+|rc[1-9]\d*)", current):
         return
     latest = fetch_latest_release()
     from repository_cache import hint
     hint('lestercorderomurillo/macos-tahoe-liquid-kde', latest)
-    if (not latest or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
+    if (not latest or not re.fullmatch(r"\d+\.\d+(?:\.\d+|rc[1-9]\d*)", latest)
             or parse_semver(latest) <= parse_semver(current)):
         return
 
